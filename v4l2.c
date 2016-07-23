@@ -233,6 +233,17 @@ retro_get_system_info(struct retro_system_info *info)
 RETRO_API void
 retro_get_system_av_info(struct retro_system_av_info *info)
 {
+	struct v4l2_cropcap cc;
+	int error;
+
+	memset(&cc, 0, sizeof(cc));
+	cc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	error = v4l2_ioctl(video_fd, VIDIOC_CROPCAP, &cc);
+	if (error == 0) {
+		info->geometry.aspect_ratio = (double)cc.pixelaspect.denominator / (double)cc.pixelaspect.numerator;
+	}
+
 	info->geometry.base_width = info->geometry.max_width = video_format.fmt.pix.width;
 	info->geometry.base_height = info->geometry.max_height = video_format.fmt.pix.height;
 	info->timing.fps = VIDEO_FPS;
