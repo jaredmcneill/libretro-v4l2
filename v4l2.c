@@ -30,7 +30,7 @@
 #define	VIDEO_FPS		29.97
 #define	AUDIO_DEVICE		"hw:1,0"
 #define	AUDIO_SAMPLE_RATE	48000
-#define	AUDIO_BUFSIZE		(AUDIO_SAMPLE_RATE * 2 * 2)
+#define	AUDIO_BUFSIZE		64
 
 #include "libretro.h"
 
@@ -51,7 +51,6 @@ static size_t video_data_len;
 static uint16_t *conv_data;
 
 static snd_pcm_t *audio_handle;
-static int16_t audio_data[AUDIO_BUFSIZE];
 
 static retro_environment_t environment_cb;
 static retro_video_refresh_t video_refresh_cb;
@@ -60,10 +59,34 @@ static retro_audio_sample_batch_t audio_sample_batch_cb;
 static retro_input_poll_t input_poll_cb;
 static retro_input_state_t input_state_cb;
 
+static void
+audio_callback(void)
+{
+	int16_t audio_data[64];
+	int i, frame;
+
+	if (audio_handle) {
+		const int frames = snd_pcm_readi(audio_handle, audio_data, sizeof(audio_data) / 4);
+		for (frame = 0, i = 0; frame < frames; frame++, i += 2)
+			audio_sample_cb(audio_data[i+0], audio_data[i+1]);
+	}
+}
+
+static void
+audio_set_state(bool enable)
+{
+}
+
 RETRO_API void
 retro_set_environment(retro_environment_t cb)
 {
+	struct retro_audio_callback audio_cb;
+
 	environment_cb = cb;
+
+	audio_cb.callback = audio_callback;
+	audio_cb.set_state = audio_set_state;
+	environment_cb(RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK, &audio_cb);
 }
 
 RETRO_API void
@@ -122,7 +145,7 @@ retro_init(void)
 	printf("  Bus Info: %s\n", caps.bus_info);
 	printf("  Version: %u.%u.%u\n", (caps.version >> 16) & 0xff, (caps.version >> 8) & 0xff, caps.version & 0xff);
 
-	error = snd_pcm_open(&audio_handle, AUDIO_DEVICE, SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
+	error = snd_pcm_open(&audio_handle, AUDIO_DEVICE, SND_PCM_STREAM_CAPTURE, 0);
 	if (error < 0) {
 		printf("Couldn't open " AUDIO_DEVICE ": %s\n", snd_strerror(error));
 		audio_handle = NULL;
@@ -234,7 +257,7 @@ retro_run(void)
 	ssize_t len;
 	uint8_t *src;
 	uint16_t *dst;
-	int i, frame;
+	int i;
 
 	input_poll_cb();
 
@@ -300,12 +323,6 @@ retro_run(void)
 #endif
 
 	video_refresh_cb(conv_data, video_format.fmt.pix.width, video_format.fmt.pix.height, video_format.fmt.pix.width * 2);
-
-	if (audio_handle) {
-		const int frames = snd_pcm_readi(audio_handle, audio_data, sizeof(audio_data) / 4);
-		for (frame = 0, i = 0; frame < frames; frame++, i += 2)
-			audio_sample_cb(audio_data[i+0], audio_data[i+1]);
-	}
 }
 
 RETRO_API size_t
