@@ -27,7 +27,7 @@
 #define	LIBRARY_NAME		"V4L2"
 #define	LIBRARY_VERSION		"0.0.1"
 #define	VIDEO_PATH		"/dev/video0"
-#define	VIDEO_FPS		29.97
+#define	VIDEO_FPS		(60/1.001)
 #define	AUDIO_DEVICE		"hw:1,0"
 #define	AUDIO_SAMPLE_RATE	48000
 #define	AUDIO_BUFSIZE		64
