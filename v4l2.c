@@ -28,12 +28,14 @@
 #define	LIBRARY_VERSION		"0.0.1"
 #define	VIDEO_PATH		"/dev/video0"
 #define	VIDEO_FPS		(60/1.001)
+#define	VIDEO_BUFFERS		2
 #define	AUDIO_DEVICE		"hw:1,0"
 #define	AUDIO_SAMPLE_RATE	48000
 #define	AUDIO_BUFSIZE		64
 
 #include "libretro.h"
 
+#include <sys/mman.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,10 +46,15 @@
 
 #include <alsa/asoundlib.h>
 
+struct video_buffer {
+	void	*start;
+	size_t	len;
+};
+
 static int video_fd = -1;
 static struct v4l2_format video_format;
-static uint8_t *video_data;
-static size_t video_data_len;
+static struct video_buffer video_buffer[VIDEO_BUFFERS];
+static size_t video_nbuffers;
 static uint16_t *conv_data;
 
 static snd_pcm_t *audio_handle;
@@ -62,7 +69,7 @@ static retro_input_state_t input_state_cb;
 static void
 audio_callback(void)
 {
-	int16_t audio_data[64];
+	int16_t audio_data[128];
 	int i, frame;
 
 	if (audio_handle) {
@@ -127,7 +134,7 @@ retro_init(void)
 	unsigned int rate;
 	int error;
 
-	video_fd = v4l2_open(VIDEO_PATH, 0);
+	video_fd = v4l2_open(VIDEO_PATH, O_RDWR, 0);
 	if (video_fd == -1) {
 		printf("Couldn't open " VIDEO_PATH ": %s\n", strerror(errno));
 		abort();
@@ -265,21 +272,28 @@ retro_reset(void)
 RETRO_API void
 retro_run(void)
 {
-	ssize_t len;
+	struct v4l2_buffer buf;
 	uint8_t *src;
 	uint16_t *dst;
-	int i;
+	int i, error;
 
 	input_poll_cb();
 
-	if (video_data == NULL || video_fd == -1)
+	if (video_fd == -1)
 		return;
 
-	len = v4l2_read(video_fd, video_data, video_format.fmt.pix.sizeimage);
-	if (len == -1)
-		printf("v4l2_read error: %s\n", strerror(errno));
+	memset(&buf, 0, sizeof(buf));
+	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	buf.memory = V4L2_MEMORY_MMAP;
 
-	src = video_data;
+	error = v4l2_ioctl(video_fd, VIDIOC_DQBUF, &buf);
+	if (error != 0) {
+		printf("VIDIOC_DQBUF failed: %s\n", strerror(errno));
+		video_refresh_cb(NULL, 0, 0, 0);
+		return;
+	}
+
+	src = video_buffer[buf.index].start;
 	dst = conv_data;
 
 #ifdef PLUGIN_RGB24
@@ -333,6 +347,10 @@ retro_run(void)
 	}
 #endif
 
+	error = v4l2_ioctl(video_fd, VIDIOC_QBUF, &buf);
+	if (error != 0)
+		printf("VIDIOC_QBUF failed: %s\n", strerror(errno));
+
 	video_refresh_cb(conv_data, video_format.fmt.pix.width, video_format.fmt.pix.height, video_format.fmt.pix.width * 2);
 }
 
@@ -369,7 +387,10 @@ retro_load_game(const struct retro_game_info *game)
 {
 	enum retro_pixel_format pixel_format;
 	struct v4l2_standard std, *pstd = NULL;
+	struct v4l2_requestbuffers reqbufs;
+	struct v4l2_buffer buf;
 	struct v4l2_format fmt;
+	enum v4l2_buf_type type;
 	v4l2_std_id std_id;
 	uint32_t index;
 	int error;
@@ -378,8 +399,6 @@ retro_load_game(const struct retro_game_info *game)
 		printf("Video device not opened\n");
 		return false;
 	}
-
-	free(video_data);
 
 	memset(&fmt, 0, sizeof(fmt));
 	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -419,24 +438,69 @@ retro_load_game(const struct retro_game_info *game)
 	}
 
 	video_format = fmt;
-	video_data_len = video_format.fmt.pix.sizeimage;
-	video_data = calloc(1, video_data_len);
-	if (video_data == NULL) {
-		printf("Cannot allocate video buffer\n");
+
+	memset(&reqbufs, 0, sizeof(reqbufs));
+	reqbufs.count = VIDEO_BUFFERS;
+	reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	reqbufs.memory = V4L2_MEMORY_MMAP;
+
+	error = v4l2_ioctl(video_fd, VIDIOC_REQBUFS, &reqbufs);
+	if (error != 0) {
+		printf("VIDIOC_REQBUFS failed: %s\n", strerror(errno));
 		return false;
 	}
-	printf("Allocated %u byte video buffer\n", video_data_len);
+	video_nbuffers = reqbufs.count;
+
+	for (index = 0; index < video_nbuffers; index++) {
+		memset(&buf, 0, sizeof(buf));
+		buf.index = index;
+		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buf.memory = V4L2_MEMORY_MMAP;
+
+		error = v4l2_ioctl(video_fd, VIDIOC_QUERYBUF, &buf);
+		if (error != 0) {
+			printf("VIDIOC_QUERYBUF failed for %u: %s\n", index, strerror(errno));
+			return false;
+		}
+
+		video_buffer[index].len = buf.length;
+		video_buffer[index].start = v4l2_mmap(NULL, buf.length, PROT_READ|PROT_WRITE, MAP_SHARED, video_fd, buf.m.offset);
+		if (video_buffer[index].start == MAP_FAILED) {
+			printf("v4l2_mmap failed: %s\n", strerror(errno));
+			return false;
+		}
+	}
+
+	for (index = 0; index < video_nbuffers; index++) {
+		memset(&buf, 0, sizeof(buf));
+		buf.index = index;
+		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buf.memory = V4L2_MEMORY_MMAP;
+		
+		error = v4l2_ioctl(video_fd, VIDIOC_QBUF, &buf);
+		if (error != 0) {
+			printf("VIDIOC_QBUF failed for %u: %s\n", index, strerror(errno));
+			return false;
+		}
+	}
 
 	conv_data = calloc(1, video_format.fmt.pix.width * video_format.fmt.pix.height * 2);	
 	if (conv_data == NULL) {
 		printf("Cannot allocate conversion buffer\n");
 		return false;
 	}
-	printf("Allocated %u byte conversion buffer\n", video_data_len);
+	printf("Allocated %u byte conversion buffer\n", video_format.fmt.pix.width * video_format.fmt.pix.height * 2);
 
 	pixel_format = RETRO_PIXEL_FORMAT_RGB565;
 	if (!environment_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &pixel_format)) {
 		printf("Cannot set pixel format\n");
+		return false;
+	}
+
+	type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	error = v4l2_ioctl(video_fd, VIDIOC_STREAMON, &type);
+	if (error != 0) {
+		printf("VIDIOC_STREAMON failed: %s\n", strerror(errno));
 		return false;
 	}
 
@@ -446,8 +510,18 @@ retro_load_game(const struct retro_game_info *game)
 RETRO_API void
 retro_unload_game(void)
 {
-	free(video_data);
-	video_data = NULL;
+	enum v4l2_buf_type type;
+	uint32_t index;
+	int error;
+
+	type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	error = v4l2_ioctl(video_fd, VIDIOC_STREAMOFF, &type);
+	if (error != 0)
+		printf("VIDIOC_STREAMOFF failed: %s\n", strerror(errno));
+
+	for (index = 0; index < video_nbuffers; index++)
+		v4l2_munmap(video_buffer[index].start, video_buffer[index].len);
+	
 	free(conv_data);
 	conv_data = NULL;
 }
