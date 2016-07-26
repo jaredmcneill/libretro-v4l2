@@ -27,7 +27,6 @@
 #define	LIBRARY_NAME		"V4L2"
 #define	LIBRARY_VERSION		"0.0.1"
 #define	VIDEO_PATH		"/dev/video0"
-#define	VIDEO_FPS		(60/1.001)
 #define	VIDEO_BUFFERS		2
 #define	AUDIO_DEVICE		"hw:1,0"
 #define	AUDIO_SAMPLE_RATE	48000
@@ -55,6 +54,7 @@ struct video_buffer {
 
 static int video_fd = -1;
 static struct v4l2_format video_format;
+static struct v4l2_standard video_standard;
 static struct video_buffer video_buffer[VIDEO_BUFFERS];
 static size_t video_nbuffers;
 static uint16_t *conv_data;
@@ -245,6 +245,8 @@ retro_get_system_av_info(struct retro_system_av_info *info)
 	struct v4l2_cropcap cc;
 	int error;
 
+	printf("get_system_av_info\n");
+
 	memset(&cc, 0, sizeof(cc));
 	cc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
@@ -253,9 +255,11 @@ retro_get_system_av_info(struct retro_system_av_info *info)
 		info->geometry.aspect_ratio = (double)cc.pixelaspect.denominator / (double)cc.pixelaspect.numerator;
 	}
 
+	printf("video_standard %s frameperiod %u/%u\n", video_standard.name, video_standard.frameperiod.denominator, video_standard.frameperiod.numerator);
+
 	info->geometry.base_width = info->geometry.max_width = video_format.fmt.pix.width;
 	info->geometry.base_height = info->geometry.max_height = video_format.fmt.pix.height;
-	info->timing.fps = VIDEO_FPS;
+	info->timing.fps = (double)video_standard.frameperiod.denominator / (double)video_standard.frameperiod.numerator;
 	info->timing.sample_rate = AUDIO_SAMPLE_RATE;
 
 	printf("Resolution %ux%u %f fps\n", info->geometry.base_width, info->geometry.base_height, info->timing.fps);
@@ -382,13 +386,14 @@ RETRO_API bool
 retro_load_game(const struct retro_game_info *game)
 {
 	enum retro_pixel_format pixel_format;
-	struct v4l2_standard std, *pstd = NULL;
+	struct v4l2_standard std;
 	struct v4l2_requestbuffers reqbufs;
 	struct v4l2_buffer buf;
 	struct v4l2_format fmt;
 	enum v4l2_buf_type type;
 	v4l2_std_id std_id;
 	uint32_t index;
+	bool std_found;
 	int error;
 
 	if (video_fd == -1) {
@@ -418,17 +423,19 @@ retro_load_game(const struct retro_game_info *game)
 		printf("VIDIOC_G_STD failed: %s\n", strerror(errno));
 		return false;
 	}
-	for (index = 0; ; index++) {
+	for (index = 0, std_found = false; ; index++) {
 		memset(&std, 0, sizeof(std));
 		std.index = index;
 		error = v4l2_ioctl(video_fd, VIDIOC_ENUMSTD, &std);
 		if (error)
 			break;
-		if (std.id == std_id)
-			pstd = &std;
+		if (std.id == std_id) {
+			video_standard = std;
+			std_found = true;
+		}
 		printf("VIDIOC_ENUMSTD[%u]: %s%s\n", index, std.name, std.id == std_id ? " [*]" : "");
 	}
-	if (!pstd) {
+	if (!std_found) {
 		printf("VIDIOC_ENUMSTD did not contain std ID %08x\n", (unsigned)std_id);
 		return false;
 	}
