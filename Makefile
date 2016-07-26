@@ -31,7 +31,13 @@ endif
 
 TARGET_NAME := v4l2
 LIBV4L2		= -lv4l2
-LIBASOUND	= -lasound
+
+ifneq ($(findstring Linux,$(shell uname -a)),)
+   CFLAGS +=	-DHAVE_UDEV 
+   LIBUDEV	= -ludev
+   CFLAGS +=	-DHAVE_ALSA
+   LIBASOUND	= -lasound
+endif
 
 ifeq ($(ARCHFLAGS),)
 ifeq ($(archs),ppc)
@@ -103,7 +109,7 @@ else
    SHARED := -shared -static-libgcc -static-libstdc++ -s -Wl,--version-script=link.T -Wl,--no-undefined
 endif
 
-LDFLAGS += $(LIBV4L2) $(LIBASOUND)
+LDFLAGS += $(LIBV4L2) $(LIBASOUND) $(LIBUDEV)
 
 ifeq ($(DEBUG), 1)
    CFLAGS += -O0 -g

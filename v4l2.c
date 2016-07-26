@@ -26,11 +26,10 @@
 
 #define	LIBRARY_NAME		"V4L2"
 #define	LIBRARY_VERSION		"0.0.1"
-#define	VIDEO_PATH		"/dev/video0"
 #define	VIDEO_BUFFERS		2
-#define	AUDIO_DEVICE		"hw:1,0"
 #define	AUDIO_SAMPLE_RATE	48000
 #define	AUDIO_BUFSIZE		64
+#define	ENVVAR_BUFLEN		1024
 
 #define	CLAMP(v, min, max)	((v) < (min) ? (min) : ((v) > (max) ? (max) : (v)))	
 
@@ -38,6 +37,7 @@
 
 #include <sys/mman.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,7 +45,13 @@
 #include <linux/videodev2.h>
 #include <libv4l2.h>
 
+#ifdef HAVE_ALSA
 #include <alsa/asoundlib.h>
+#endif
+
+#ifdef HAVE_UDEV
+#include <libudev.h>
+#endif
 
 struct video_buffer {
 	void	*start;
@@ -59,7 +65,9 @@ static struct video_buffer video_buffer[VIDEO_BUFFERS];
 static size_t video_nbuffers;
 static uint16_t *conv_data;
 
+#ifdef HAVE_ALSA
 static snd_pcm_t *audio_handle;
+#endif
 
 static retro_environment_t environment_cb;
 static retro_video_refresh_t video_refresh_cb;
@@ -68,6 +76,7 @@ static retro_audio_sample_batch_t audio_sample_batch_cb;
 static retro_input_poll_t input_poll_cb;
 static retro_input_state_t input_state_cb;
 
+#ifdef HAVE_ALSA
 static void
 audio_callback(void)
 {
@@ -85,17 +94,142 @@ static void
 audio_set_state(bool enable)
 {
 }
+#endif
+
+static void
+appendstr(char *dst, const char *src, size_t dstsize)
+{
+	size_t resid;
+
+	resid = dstsize - (strlen(dst) + 1);
+	if (resid == 0)
+		return;
+	strncat(dst, src, resid);
+}
+
+static void
+enumerate_video_devices(char *buf, size_t buflen)
+{
+	memset(buf, 0, buflen);
+
+	appendstr(buf, "Video capture device; ", buflen);
+
+#ifdef HAVE_UDEV
+	/* Get a list of devices matching the "video4linux" subsystem from udev */
+	struct udev *udev;
+	struct udev_device *dev;
+	struct udev_enumerate *enumerate;
+	struct udev_list_entry *devices, *dev_list_entry;
+	const char *path, *name;
+	int ndevs;
+
+	udev = udev_new();
+	if (!udev) {
+		printf("Cannot create udev context\n");
+		return;
+	}
+
+	enumerate = udev_enumerate_new(udev);
+	if (!enumerate) {
+		printf("Cannot create enumerate context\n");
+		udev_unref(udev);
+		return;
+	}
+
+	udev_enumerate_add_match_subsystem(enumerate, "video4linux");
+	udev_enumerate_scan_devices(enumerate);
+
+	devices = udev_enumerate_get_list_entry(enumerate);
+	if (!devices) {
+		printf("Cannot get video device list\n");
+		udev_enumerate_unref(enumerate);
+		udev_unref(udev);
+		return;
+	}
+
+	ndevs = 0;
+	udev_list_entry_foreach(dev_list_entry, devices) {
+		path = udev_list_entry_get_name(dev_list_entry);
+		dev = udev_device_new_from_syspath(udev, path);
+		name = udev_device_get_devnode(dev);
+
+		if (strncmp(name, "/dev/video", strlen("/dev/video")) == 0) {
+			if (ndevs > 0)
+				appendstr(buf, "|", buflen);
+			appendstr(buf, name, buflen);
+			ndevs++;
+		}
+
+		udev_device_unref(dev);
+	}
+
+	udev_enumerate_unref(enumerate);
+	udev_unref(udev);
+#else
+	/* Just return a few options. We'll fail later if the device is not found. */
+	appendstr(buf, "/dev/video0|/dev/video1|/dev/video2|/dev/video3", buflen);
+#endif
+}
+
+static void
+enumerate_audio_devices(char *buf, size_t buflen)
+{
+	memset(buf, 0, buflen);
+
+	appendstr(buf, "Audio capture device; ", buflen);
+
+#ifdef HAVE_ALSA
+	void **hints, **n;
+	char *ioid, *name;
+	int ndevs;
+
+	if (snd_device_name_hint(-1, "pcm", &hints) < 0)
+		return;
+
+	ndevs = 0;
+	for (n = hints; *n; n++) {
+		name = snd_device_name_get_hint(*n, "NAME");
+		ioid = snd_device_name_get_hint(*n, "IOID");
+		if ((ioid == NULL || strcmp(ioid, "Input") == 0) &&
+		    (strncmp(name, "hw:", strlen("hw:")) == 0 || strncmp(name, "default:", strlen("default:")) == 0)) {
+			if (ndevs > 0)
+				appendstr(buf, "|", buflen);
+			appendstr(buf, name, buflen);
+			++ndevs;
+		}
+		free(name);
+		free(ioid);
+	}
+
+	snd_device_name_free_hint(hints);
+#endif
+}
 
 RETRO_API void
 retro_set_environment(retro_environment_t cb)
 {
-	struct retro_audio_callback audio_cb;
+	char video_devices[ENVVAR_BUFLEN];
+	char audio_devices[ENVVAR_BUFLEN];
 
 	environment_cb = cb;
 
+#ifdef HAVE_ALSA
+	struct retro_audio_callback audio_cb;
 	audio_cb.callback = audio_callback;
 	audio_cb.set_state = audio_set_state;
 	environment_cb(RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK, &audio_cb);
+#endif
+
+	enumerate_video_devices(video_devices, sizeof(video_devices));
+	enumerate_audio_devices(audio_devices, sizeof(audio_devices));
+
+	struct retro_variable envvars[] = {
+		{ "v4l2_videodev", video_devices },
+		{ "v4l2_audiodev", audio_devices },
+		{ NULL, NULL }
+	};
+
+	environment_cb(RETRO_ENVIRONMENT_SET_VARIABLES, envvars);
 }
 
 RETRO_API void
@@ -131,96 +265,129 @@ retro_set_input_state(retro_input_state_t cb)
 RETRO_API void
 retro_init(void)
 {
+}
+
+static bool
+open_devices(void)
+{
+	struct retro_variable videodev = { "v4l2_videodev", NULL };
+	struct retro_variable audiodev = { "v4l2_audiodev", NULL };
 	struct v4l2_capability caps;
-	snd_pcm_hw_params_t *hw_params;
-	unsigned int rate;
 	int error;
 
-	video_fd = v4l2_open(VIDEO_PATH, O_RDWR, 0);
+	environment_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &videodev);
+	if (videodev.value == NULL) {
+		printf("v4l2_videodev not defined\n");
+		return false;
+	}
+
+	environment_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &audiodev);
+
+	video_fd = v4l2_open(videodev.value, O_RDWR, 0);
 	if (video_fd == -1) {
-		printf("Couldn't open " VIDEO_PATH ": %s\n", strerror(errno));
-		abort();
+		printf("Couldn't open %s: %s\n", videodev.value, strerror(errno));
+		return false;
 	}
 
 	error = v4l2_ioctl(video_fd, VIDIOC_QUERYCAP, &caps);
 	if (error != 0) {
 		printf("VIDIOC_QUERYCAP failed: %s\n", strerror(errno));
-		abort();
+		v4l2_close(video_fd);
+		return false;
 	}
 
-	printf("%s:\n", VIDEO_PATH);
+	printf("%s:\n", videodev.value);
 	printf("  Driver: %s\n", caps.driver);
 	printf("  Card: %s\n", caps.card);
 	printf("  Bus Info: %s\n", caps.bus_info);
 	printf("  Version: %u.%u.%u\n", (caps.version >> 16) & 0xff, (caps.version >> 8) & 0xff, caps.version & 0xff);
 
-	error = snd_pcm_open(&audio_handle, AUDIO_DEVICE, SND_PCM_STREAM_CAPTURE, 0);
-	if (error < 0) {
-		printf("Couldn't open " AUDIO_DEVICE ": %s\n", snd_strerror(error));
-		audio_handle = NULL;
-	}
+#ifdef HAVE_ALSA
+	if (audiodev.value) {
+		snd_pcm_hw_params_t *hw_params;
+		unsigned int rate;
 
-	if (audio_handle) {
+		error = snd_pcm_open(&audio_handle, audiodev.value, SND_PCM_STREAM_CAPTURE, 0);
+		if (error < 0) {
+			printf("Couldn't open %s: %s\n", audiodev.value, snd_strerror(error));
+			return false;
+		}
+
 		error = snd_pcm_hw_params_malloc(&hw_params);
 		if (error) {
 			printf("Couldn't allocate hw param structure: %s\n", snd_strerror(error));
-			abort();
+			return false;
 		}
 		error = snd_pcm_hw_params_any(audio_handle, hw_params);
 		if (error) {
 			printf("Couldn't initialize hw param structure: %s\n", snd_strerror(error));
-			abort();
+			return false;
 		}
 		error = snd_pcm_hw_params_set_access(audio_handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
 		if (error) {
 			printf("Couldn't set hw param access type: %s\n", snd_strerror(error));
-			abort();
+			return false;
 		}
 		error = snd_pcm_hw_params_set_format(audio_handle, hw_params, SND_PCM_FORMAT_S16_LE);
 		if (error) {	
 			printf("Couldn't set hw param format to SND_PCM_FORMAT_S16_LE: %s\n", snd_strerror(error));
-			abort();
+			return false;
 		}
 		rate = AUDIO_SAMPLE_RATE;
 		error = snd_pcm_hw_params_set_rate_near(audio_handle, hw_params, &rate, 0);
 		if (error) {
 			printf("Couldn't set hw param sample rate to %u: %s\n", rate, snd_strerror(error));
-			abort();
+			return false;
 		}
 		if (rate != AUDIO_SAMPLE_RATE) {
 			printf("Hardware doesn't support sample rate %u (returned %u)\n", AUDIO_SAMPLE_RATE, rate);
-			abort();
+			return false;
 		}
 		error = snd_pcm_hw_params_set_channels(audio_handle, hw_params, 2);
 		if (error) {
 			printf("Couldn't set hw param channels to 2: %s\n", snd_strerror(error));
-			abort();
+			return false;
 		}
 		error = snd_pcm_hw_params(audio_handle, hw_params);
 		if (error) {
 			printf("Couldn't set hw params: %s\n", snd_strerror(error));
-			abort();
+			return false;
 		}
 		snd_pcm_hw_params_free(hw_params);
 
 		error = snd_pcm_prepare(audio_handle);
 		if (error) {
 			printf("Couldn't prepare audio interface for use: %s\n", snd_strerror(error));
-			abort();
+			return false;
 		}
 
-		printf("Using ALSA for audio input\n");
+		printf("Using ALSA device %s for audio input\n", audiodev.value);
+	}
+#endif
+
+	return true;
+}
+
+static void
+close_devices(void)
+{
+#ifdef HAVE_ALSA
+	if (audio_handle) {
+		snd_pcm_close(audio_handle);
+		audio_handle = NULL;
+	}
+#endif
+
+	if (video_fd != -1) {
+		v4l2_close(video_fd);
+		video_fd = -1;
 	}
 }
 
 RETRO_API void
 retro_deinit(void)
 {
-	if (audio_handle)
-		snd_pcm_close(audio_handle);
-
-	if (video_fd != -1)
-		v4l2_close(video_fd);
+	close_devices();
 }
 
 RETRO_API unsigned
@@ -245,8 +412,6 @@ retro_get_system_av_info(struct retro_system_av_info *info)
 	struct v4l2_cropcap cc;
 	int error;
 
-	printf("get_system_av_info\n");
-
 	memset(&cc, 0, sizeof(cc));
 	cc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
@@ -254,8 +419,6 @@ retro_get_system_av_info(struct retro_system_av_info *info)
 	if (error == 0) {
 		info->geometry.aspect_ratio = (double)cc.pixelaspect.denominator / (double)cc.pixelaspect.numerator;
 	}
-
-	printf("video_standard %s frameperiod %u/%u\n", video_standard.name, video_standard.frameperiod.denominator, video_standard.frameperiod.numerator);
 
 	info->geometry.base_width = info->geometry.max_width = video_format.fmt.pix.width;
 	info->geometry.base_height = info->geometry.max_height = video_format.fmt.pix.height;
@@ -273,6 +436,8 @@ retro_set_controller_port_device(unsigned port, unsigned device)
 RETRO_API void
 retro_reset(void)
 {
+	close_devices();
+	open_devices();
 }
 
 RETRO_API void
@@ -396,8 +561,9 @@ retro_load_game(const struct retro_game_info *game)
 	bool std_found;
 	int error;
 
-	if (video_fd == -1) {
-		printf("Video device not opened\n");
+	if (open_devices() == false) {
+		printf("Couldn't open capture device\n");
+		close_devices();
 		return false;
 	}
 
@@ -517,16 +683,20 @@ retro_unload_game(void)
 	uint32_t index;
 	int error;
 
-	type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	error = v4l2_ioctl(video_fd, VIDIOC_STREAMOFF, &type);
-	if (error != 0)
-		printf("VIDIOC_STREAMOFF failed: %s\n", strerror(errno));
+	if (video_fd != -1) {
+		type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		error = v4l2_ioctl(video_fd, VIDIOC_STREAMOFF, &type);
+		if (error != 0)
+			printf("VIDIOC_STREAMOFF failed: %s\n", strerror(errno));
 
-	for (index = 0; index < video_nbuffers; index++)
-		v4l2_munmap(video_buffer[index].start, video_buffer[index].len);
+		for (index = 0; index < video_nbuffers; index++)
+			v4l2_munmap(video_buffer[index].start, video_buffer[index].len);
+	}
 	
 	free(conv_data);
 	conv_data = NULL;
+
+	close_devices();
 }
 
 RETRO_API bool
