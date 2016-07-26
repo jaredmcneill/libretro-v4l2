@@ -25,7 +25,7 @@
  */
 
 #define	LIBRARY_NAME		"V4L2"
-#define	LIBRARY_VERSION		"0.0.1"
+#define	LIBRARY_VERSION		"0.0.2"
 #define	VIDEO_BUFFERS		2
 #define	AUDIO_SAMPLE_RATE	48000
 #define	AUDIO_BUFSIZE		64
@@ -58,6 +58,9 @@ struct video_buffer {
 	size_t	len;
 };
 
+/*
+ * Video capture state
+ */
 static int video_fd = -1;
 static struct v4l2_format video_format;
 static struct v4l2_standard video_standard;
@@ -65,10 +68,16 @@ static struct video_buffer video_buffer[VIDEO_BUFFERS];
 static size_t video_nbuffers;
 static uint16_t *conv_data;
 
+/*
+ * Audio capture state
+ */
 #ifdef HAVE_ALSA
 static snd_pcm_t *audio_handle;
 #endif
 
+/*
+ * Libretro API callbacks
+ */
 static retro_environment_t environment_cb;
 static retro_video_refresh_t video_refresh_cb;
 static retro_audio_sample_t audio_sample_cb;
@@ -275,20 +284,24 @@ open_devices(void)
 	struct v4l2_capability caps;
 	int error;
 
+	/* Get the video and audio capture device names from the environment */
 	environment_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &videodev);
+	environment_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &audiodev);
+
+	/* Video device is required */
 	if (videodev.value == NULL) {
 		printf("v4l2_videodev not defined\n");
 		return false;
 	}
 
-	environment_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &audiodev);
-
+	/* Open the V4L2 device */
 	video_fd = v4l2_open(videodev.value, O_RDWR, 0);
 	if (video_fd == -1) {
 		printf("Couldn't open %s: %s\n", videodev.value, strerror(errno));
 		return false;
 	}
 
+	/* Query V4L2 device capabilities */
 	error = v4l2_ioctl(video_fd, VIDIOC_QUERYCAP, &caps);
 	if (error != 0) {
 		printf("VIDIOC_QUERYCAP failed: %s\n", strerror(errno));
@@ -307,6 +320,9 @@ open_devices(void)
 		snd_pcm_hw_params_t *hw_params;
 		unsigned int rate;
 
+		/*
+		 * Open the audio capture device and configure it for 48kHz, 16-bit stereo
+		 */
 		error = snd_pcm_open(&audio_handle, audiodev.value, SND_PCM_STREAM_CAPTURE, 0);
 		if (error < 0) {
 			printf("Couldn't open %s: %s\n", audiodev.value, snd_strerror(error));
@@ -412,9 +428,11 @@ retro_get_system_av_info(struct retro_system_av_info *info)
 	struct v4l2_cropcap cc;
 	int error;
 
+	/*
+	 * Query the device cropping limits. If available, we can use this to find the capture pixel aspect.
+	 */
 	memset(&cc, 0, sizeof(cc));
 	cc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
 	error = v4l2_ioctl(video_fd, VIDIOC_CROPCAP, &cc);
 	if (error == 0) {
 		info->geometry.aspect_ratio = (double)cc.pixelaspect.denominator / (double)cc.pixelaspect.numerator;
