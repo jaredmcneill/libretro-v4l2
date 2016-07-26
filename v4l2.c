@@ -31,8 +31,6 @@
 #define	AUDIO_BUFSIZE		64
 #define	ENVVAR_BUFLEN		1024
 
-#define	CLAMP(v, min, max)	((v) < (min) ? (min) : ((v) > (max) ? (max) : (v)))	
-
 #include "libretro.h"
 
 #include <sys/mman.h>
@@ -485,50 +483,10 @@ retro_run(void)
 	src = video_buffer[buf.index].start;
 	dst = conv_data;
 
-#ifdef PLUGIN_RGB24
 	/* RGB24 to RGB565 */
 	for (i = 0; i < video_format.fmt.pix.width * video_format.fmt.pix.height; i++, src += 3, dst += 1) {
 		*dst = ((src[0] >> 3) << 11) | ((src[1] >> 2) << 5) | ((src[2] >> 3) << 0);
 	}
-#else
-	/* UYVY to RGB565 */
-	const int K1 = (int)(1.402f * (1 << 16));
-	const int K2 = (int)(0.714f * (1 << 16));
-	const int K3 = (int)(0.334f * (1 << 16));
-	const int K4 = (int)(1.772f * (1 << 16));
-	int R, G, B;
-	for (i = 0; i < video_format.fmt.pix.width * video_format.fmt.pix.height; i += 2, src += 4) {
-		const uint8_t U = src[0];
-		const uint8_t Y1 = src[1];
-		const uint8_t V = src[2];
-		const uint8_t Y2 = src[3];
-
-		const int8_t uf = U - 128;
-		const int8_t vf = V - 128;
-
-		R = Y1 + (K1 * vf >> 16);
-		G = Y1 - (K2 * vf >> 16) - (K3 * uf >> 16);
-		B = Y1 + (K4 * uf >> 16);
-
-		R = CLAMP(R, 0, 255);
-		G = CLAMP(G, 0, 255);
-		B = CLAMP(B, 0, 255);
-
-		*dst = ((R >> 3) << 11) | ((G >> 2) << 5) | ((B >> 3) << 0);
-		dst++;
-
-		R = Y2 + (K1 * vf >> 16);
-		G = Y2 - (K2 * vf >> 16) - (K3 * uf >> 16);
-		B = Y2 + (K4 * uf >> 16);
-	
-		R = CLAMP(R, 0, 255);
-		G = CLAMP(G, 0, 255);
-		B = CLAMP(B, 0, 255);
-
-		*dst = ((R >> 3) << 11) | ((G >> 2) << 5) | ((B >> 3) << 0);
-		dst++;
-	}
-#endif
 
 	error = v4l2_ioctl(video_fd, VIDIOC_QBUF, &buf);
 	if (error != 0)
@@ -593,14 +551,12 @@ retro_load_game(const struct retro_game_info *game)
 		printf("VIDIOC_G_FMT failed: %s\n", strerror(errno));
 		return false;
 	}
-#ifdef PLUGIN_RGB24
 	fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB24;
 	error = v4l2_ioctl(video_fd, VIDIOC_S_FMT, &fmt);
 	if (error != 0) {
 		printf("VIDIOC_S_FMT failed: %s\n", strerror(errno));
 		return false;
 	}
-#endif
 
 	error = v4l2_ioctl(video_fd, VIDIOC_G_STD, &std_id);
 	if (error != 0) {
