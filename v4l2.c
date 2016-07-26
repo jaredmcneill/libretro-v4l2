@@ -33,6 +33,8 @@
 #define	AUDIO_SAMPLE_RATE	48000
 #define	AUDIO_BUFSIZE		64
 
+#define	CLAMP(v, min, max)	((v) < (min) ? (min) : ((v) > (max) ? (max) : (v)))	
+
 #include "libretro.h"
 
 #include <sys/mman.h>
@@ -321,12 +323,9 @@ retro_run(void)
 		G = Y1 - (K2 * vf >> 16) - (K3 * uf >> 16);
 		B = Y1 + (K4 * uf >> 16);
 
-		if (R < 0) R = 0;
-		else if (R > 255) R = 255;
-		if (G < 0) G = 0;
-		else if (G > 255) G = 255;
-		if (B < 0) B = 0;
-		else if (B > 255) B = 255;
+		R = CLAMP(R, 0, 255);
+		G = CLAMP(G, 0, 255);
+		B = CLAMP(B, 0, 255);
 
 		*dst = ((R >> 3) << 11) | ((G >> 2) << 5) | ((B >> 3) << 0);
 		dst++;
@@ -335,12 +334,9 @@ retro_run(void)
 		G = Y2 - (K2 * vf >> 16) - (K3 * uf >> 16);
 		B = Y2 + (K4 * uf >> 16);
 	
-		if (R < 0) R = 0;
-		else if (R > 255) R = 255;
-		if (G < 0) G = 0;
-		else if (G > 255) G = 255;
-		if (B < 0) B = 0;
-		else if (B > 255) B = 255;
+		R = CLAMP(R, 0, 255);
+		G = CLAMP(G, 0, 255);
+		B = CLAMP(B, 0, 255);
 
 		*dst = ((R >> 3) << 11) | ((G >> 2) << 5) | ((B >> 3) << 0);
 		dst++;
