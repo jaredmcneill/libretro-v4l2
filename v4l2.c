@@ -708,7 +708,7 @@ retro_load_game_special(unsigned game_type, const struct retro_game_info *info, 
 RETRO_API unsigned
 retro_get_region(void)
 {
-	return RETRO_REGION_NTSC;
+	return (video_standard.id & V4L2_STD_NTSC) != 0 ? RETRO_REGION_NTSC : RETRO_REGION_PAL;
 }
 
 RETRO_API void *
